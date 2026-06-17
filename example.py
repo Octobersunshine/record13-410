@@ -3,10 +3,19 @@ import time
 from delay_queue import DelayQueue
 
 PERSIST_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
+PERSIST_FILE2 = os.path.join(os.path.dirname(__file__), "tasks_cancel.json")
 
 
 def my_callback(name: str, value: int) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] 任务执行: name={name}, value={value}")
+
+
+_executed_tasks: set[str] = set()
+
+
+def tracking_callback(name: str, value: int) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] ❗ 任务执行: name={name}, value={value}")
+    _executed_tasks.add(name)
 
 
 def demo_basic_usage() -> None:
@@ -75,7 +84,82 @@ def demo_persistent_restart() -> None:
     print(f"[{time.strftime('%H:%M:%S')}] 持久化文件保留在: {PERSIST_FILE}")
 
 
+def demo_cancel_feature() -> None:
+    print()
+    print("=" * 60)
+    print("【示例3】任务取消功能（task_id 取消 + 持久化验证）")
+    print("=" * 60)
+
+    _executed_tasks.clear()
+
+    if os.path.exists(PERSIST_FILE2):
+        os.remove(PERSIST_FILE2)
+
+    print(f"[{time.strftime('%H:%M:%S')}] 启动服务，提交多个任务...")
+    queue = DelayQueue(persist_path=PERSIST_FILE2)
+    queue.register_callback("tracker", tracking_callback)
+    queue.start()
+
+    t_normal_run = queue.submit(3, tracking_callback, "WILL_RUN_1", 1)
+    t_cancel_mem = queue.submit(3, tracking_callback, "SHOULD_CANCEL_MEM", 2)
+    t_persist_run = queue.submit_persistent(5, "tracker", "WILL_RUN_2", 3)
+    t_cancel_persist = queue.submit_persistent(5, "tracker", "SHOULD_CANCEL_DISK", 4)
+
+    print(f"[{time.strftime('%H:%M:%S')}] 已提交 4 个任务，ID 前缀:")
+    print(f"  - WILL_RUN_1          (内存, 3s): {t_normal_run[:8]}")
+    print(f"  - SHOULD_CANCEL_MEM   (内存, 3s): {t_cancel_mem[:8]}")
+    print(f"  - WILL_RUN_2          (持久化,5s): {t_persist_run[:8]}")
+    print(f"  - SHOULD_CANCEL_DISK  (持久化,5s): {t_cancel_persist[:8]}")
+
+    print(f"\n[{time.strftime('%H:%M:%S')}] 立即取消 SHOULD_CANCEL_MEM 和 SHOULD_CANCEL_DISK ...")
+    r1 = queue.cancel(t_cancel_mem)
+    r2 = queue.cancel(t_cancel_persist)
+    r3 = queue.cancel("nonexistent_task_id_xyz")
+    print(f"  - cancel(SHOULD_CANCEL_MEM)  -> {r1}")
+    print(f"  - cancel(SHOULD_CANCEL_DISK) -> {r2}")
+    print(f"  - cancel(不存在的ID)         -> {r3}")
+
+    print(f"\n[{time.strftime('%H:%M:%S')}] 等待 7 秒（超过所有任务的到期时间）...\n")
+    time.sleep(7)
+
+    print(f"\n[{time.strftime('%H:%M:%S')}] ====== 执行结果验证 ======")
+    expected = {"WILL_RUN_1", "WILL_RUN_2"}
+    not_expected = {"SHOULD_CANCEL_MEM", "SHOULD_CANCEL_DISK"}
+    print(f"实际执行的任务: {sorted(_executed_tasks)}")
+    print(f"预期应执行:     {sorted(expected)}")
+    print(f"预期不执行:     {sorted(not_expected)}")
+
+    ok_expected = expected.issubset(_executed_tasks)
+    ok_notrun = not_expected.isdisjoint(_executed_tasks)
+    print(f"\n验证: 应执行的都执行了 -> {'✅ 通过' if ok_expected else '❌ 失败'}")
+    print(f"验证: 应取消的都没执行 -> {'✅ 通过' if ok_notrun else '❌ 失败'}")
+
+    queue.stop()
+
+    print(f"\n[{time.strftime('%H:%M:%S')}] 重启服务，验证持久化取消效果...")
+    _executed_tasks.clear()
+    queue2 = DelayQueue(persist_path=PERSIST_FILE2)
+    queue2.register_callback("tracker", tracking_callback)
+    restored = queue2.load_persistent()
+    print(f"[{time.strftime('%H:%M:%S')}] 重启后恢复任务数: {restored}")
+    print(f"[{time.strftime('%H:%M:%S')}] (预期 = 0，因为 WILL_RUN_2 已在上轮执行完毕；SHOULD_CANCEL_DISK 已被取消不写入)")
+    queue2.start()
+    time.sleep(2)
+    queue2.stop()
+    if _executed_tasks:
+        print(f"[{time.strftime('%H:%M:%S')}] ❌ 异常 - 重启后又执行了: {sorted(_executed_tasks)}")
+    else:
+        print(f"[{time.strftime('%H:%M:%S')}] ✅ 重启后无额外任务执行 - 持久化取消正常")
+
+    if os.path.exists(PERSIST_FILE2):
+        os.remove(PERSIST_FILE2)
+
+
 if __name__ == "__main__":
     demo_basic_usage()
+    demo_cancel_feature()
     print()
     demo_persistent_restart()
+
+    if os.path.exists(PERSIST_FILE):
+        os.remove(PERSIST_FILE)
